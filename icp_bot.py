@@ -788,6 +788,20 @@ def main():
     
     state = load_state()
     logger.info("Ботът е стартиран")
+
+def main():
+    # Вземи токените от environment variables (GitHub Secrets)
+    global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    
+    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
+    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
+    
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.error("Липсват TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID!")
+        logger.error("Добави ги като Secrets в GitHub Actions")
+        return
+    
+    # Останалият код...
     
     # Тестова проверка дали Telegram работи
     test_msg = "🤖 Ботът е стартиран успешно!"
