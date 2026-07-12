@@ -13,8 +13,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ============ НАСТРОЙКИ ============
-TELEGRAM_BOT_TOKEN = "7355491048:AAF5TGe5T6WsRAmUwshNKBsQt4pZj6wX4qo"
-TELEGRAM_CHAT_ID = "6153104079"
+TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
 
 RUN_MODE = "loop"  # "once" или "loop"
 PRICE_CHECK_INTERVAL_MIN = 1
@@ -788,6 +788,30 @@ def main():
     
     state = load_state()
     logger.info("Ботът е стартиран")
+
+    def main():
+    """Главна функция"""
+    if "PUT_YOUR" in TELEGRAM_BOT_TOKEN or "PUT_YOUR" in TELEGRAM_CHAT_ID:
+        logger.error("Първо попълни TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в скрипта.")
+        return
+    
+    # ===== НОВИ РЕДОВЕ - ДОБАВИ ТОВА =====
+    global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    
+    # Вземи токените от environment variables (GitHub Secrets)
+    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
+    TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
+    
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.error("Липсват TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID!")
+        logger.error("Добави ги като Secrets в GitHub Actions")
+        return
+    # ===== КРАЙ НА НОВИТЕ РЕДОВЕ =====
+    
+    state = load_state()
+    logger.info("Ботът е стартиран")
+    
+    # Останалият код...
     
     # Тестова проверка дали Telegram работи
     test_msg = "🤖 Ботът е стартиран успешно!"
