@@ -13,8 +13,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ============ НАСТРОЙКИ ============
-TELEGRAM_BOT_TOKEN = "7355491048:AAF5TGe5T6WsRAmUwshNKBsQt4pZj6wX4qo"
-TELEGRAM_CHAT_ID = "6153104079"
+TELEGRAM_BOT_TOKEN = ""
+TELEGRAM_CHAT_ID = ""
 
 RUN_MODE = "loop"  # "once" или "loop"
 PRICE_CHECK_INTERVAL_MIN = 1
