@@ -13,12 +13,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ============ НАСТРОЙКИ ============
-TELEGRAM_BOT_TOKEN = ""
-TELEGRAM_CHAT_ID = ""
+TELEGRAM_BOT_TOKEN = ""  # Взема се от environment
+TELEGRAM_CHAT_ID = ""    # Взема се от environment
 
-RUN_MODE = "loop"  # "once" или "loop"
+RUN_MODE = "once"  # За GitHub Actions
 PRICE_CHECK_INTERVAL_MIN = 1
-NEWS_CHECK_INTERVAL_MIN = 5
 STATE_FILE = "icp_bot_state.json"
 LOG_FILE = "icp_bot.log"
 
@@ -492,46 +491,22 @@ def format_signal_message(current: Dict, sig: Dict, fear_greed: Optional[Dict], 
         f"💰 <b>Price</b>: {format_price(sig['price'])}",
         f"{chg_emoji} <b>24h</b>: {chg:+.2f}%",
         "",
-        f"📊 <b>Market Cap</b>",
-        f"{format_large_number(sig['market_cap'])}",
+        f"📊 <b>Market Cap</b>: {format_large_number(sig['market_cap'])}",
+        f"💵 <b>Volume</b>: {format_large_number(sig['volume_24h'])}",
         "",
-        f"💵 <b>Volume</b>",
-        f"{format_large_number(sig['volume_24h'])}",
+        f"📉 <b>RSI(14)</b>: {sig['rsi']:.1f}{rsi_status}" if sig["rsi"] else "📉 RSI: N/A",
+        f"📈 <b>MACD</b>: {macd_status}",
+        f"📊 <b>SMA20</b>: {format_price(sig['sma20'])}",
+        f"📊 <b>SMA50</b>: {format_price(sig['sma50'])}",
         "",
-        f"📉 <b>RSI(14)</b>",
-        f"{sig['rsi']:.1f}{rsi_status}" if sig["rsi"] else "N/A",
+        f"🎯 <b>Signal</b>: {signal_emoji} {sig['verdict']}",
+        f"🤖 <b>AI Score</b>: {sig['ai_score']:.1f} / 10",
         "",
-        f"📈 <b>MACD</b>",
-        macd_status,
+        f"😨 <b>Fear & Greed</b>: {fg_str}",
+        f"₿ <b>BTC Dominance</b>: {btc_str}",
         "",
-        f"📊 <b>SMA20</b>",
-        format_price(sig['sma20']),
-        "",
-        f"📊 <b>SMA50</b>",
-        format_price(sig['sma50']),
-        "",
-        f"📊 <b>Bollinger Bands</b>",
-        f"Upper: {format_price(sig['bb_upper'])}",
-        f"Middle: {format_price(sig['bb_middle'])}",
-        f"Lower: {format_price(sig['bb_lower'])}",
-        "",
-        f"🎯 <b>Signal</b>",
-        f"{signal_emoji} {sig['verdict']}",
-        "",
-        f"🤖 <b>AI Score</b>",
-        f"{sig['ai_score']:.1f} / 10",
-        "",
-        f"😨 <b>Fear & Greed</b>",
-        fg_str,
-        "",
-        f"₿ <b>BTC Dominance</b>",
-        btc_str,
-        "",
-        f"🏆 <b>ATH</b>",
-        format_price(sig['ath']),
-        "",
-        f"📉 <b>Distance from ATH</b>",
-        f"{sig['ath_change_pct']:+.1f}%" if sig["ath_change_pct"] else "N/A",
+        f"🏆 <b>ATH</b>: {format_price(sig['ath'])}",
+        f"📉 <b>Distance from ATH</b>: {sig['ath_change_pct']:+.1f}%" if sig["ath_change_pct"] else "N/A",
         "",
         "<i>Автоматичен технически сигнал, не е финансов съвет.</i>"
     ]
@@ -641,60 +616,6 @@ def format_daily_report(sig: Dict, current: Dict, fear_greed: Optional[Dict], bt
     return "\n".join(lines)
 
 
-# RSS фийдове
-NEWS_FEEDS = [
-    {"url": "https://cointelegraph.com/rss/tag/internet-computer", "name": "Cointelegraph", "keyword_filter": False},
-    {"url": "https://www.coindesk.com/arc/outboundfeeds/rss/", "name": "CoinDesk", "keyword_filter": True},
-    {"url": "https://decrypt.co/feed", "name": "Decrypt", "keyword_filter": True},
-    {"url": "https://cryptoslate.com/feed/", "name": "CryptoSlate", "keyword_filter": True},
-]
-
-ICP_KEYWORD_RE = re.compile(r"\b(icp|internet computer)\b", re.IGNORECASE)
-
-
-def fetch_news() -> List[Dict]:
-    """Взима новини от RSS фийдове"""
-    items = []
-    for feed in NEWS_FEEDS:
-        try:
-            parsed = feedparser.parse(feed["url"])
-            for entry in parsed.entries[:20]:
-                title = entry.get("title", "")
-                summary = entry.get("summary", "")
-                if feed["keyword_filter"] and not ICP_KEYWORD_RE.search(title + " " + summary):
-                    continue
-                link = entry.get("link", "")
-                item_id = entry.get("id") or link
-                if entry.get("published_parsed"):
-                    published_ts = calendar.timegm(entry["published_parsed"])
-                elif entry.get("updated_parsed"):
-                    published_ts = calendar.timegm(entry["updated_parsed"])
-                else:
-                    published_ts = int(time.time())
-                items.append({
-                    "id": item_id,
-                    "title": title,
-                    "url": link,
-                    "source": feed["name"],
-                    "published_on": published_ts,
-                })
-        except Exception as e:
-            logger.error(f"Грешка при четене на RSS ({feed['name']}): {e}")
-    items.sort(key=lambda x: x["published_on"])
-    return items
-
-
-def format_news_message(item: Dict) -> str:
-    """Форматира новинарско съобщение"""
-    published = datetime.fromtimestamp(item["published_on"], tz=timezone.utc)
-    when = published.strftime("%d %b %Y, %H:%M UTC")
-    return (
-        f"📰 <b>{item['title']}</b>\n"
-        f"{item['source']} · {when}\n"
-        f"{item['url']}"
-    )
-
-
 def run_price_check(state: Dict):
     """Изпълнява проверка на цена и сигнал"""
     try:
@@ -755,42 +676,8 @@ def run_price_check(state: Dict):
         logger.error(traceback.format_exc())
 
 
-def run_news_check(state: Dict):
-    """Изпълнява проверка за нови новини"""
-    try:
-        logger.info("Проверка за новини...")
-        items = fetch_news()
-        sent_ids = set(state.get("sent_news_ids", []))
-        new_items = [i for i in items if str(i["id"]) not in sent_ids]
-        new_items = new_items[-5:]  # Максимум 5 новини
-        
-        for item in new_items:
-            send_telegram(format_news_message(item))
-            sent_ids.add(str(item["id"]))
-            time.sleep(1)
-        
-        if new_items:
-            state["sent_news_ids"] = list(sent_ids)[-200:]
-            save_state(state)
-            logger.info(f"Изпратени {len(new_items)} нови новини.")
-        else:
-            logger.info("Няма нови новини.")
-            
-    except Exception as e:
-        logger.error(f"Грешка при проверка на новини: {e}")
-
-
 def main():
-    """Главна функция"""
-    if "PUT_YOUR" in TELEGRAM_BOT_TOKEN or "PUT_YOUR" in TELEGRAM_CHAT_ID:
-        logger.error("Първо попълни TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в скрипта.")
-        return
-    
-    state = load_state()
-    logger.info("Ботът е стартиран")
-
-def main():
-    """Главна функция"""
+    """Главна функция - САМО ЦЕНОВИ СИГНАЛИ (без новини)"""
     global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
     
     # Вземи токените от environment variables (GitHub Secrets)
@@ -798,59 +685,26 @@ def main():
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
     
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.error("Липсват TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID!")
+        logger.error("❌ Липсват TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID!")
         logger.error("Добави ги като Secrets в GitHub Actions")
         return
     
     # Зареди състоянието
     state = load_state()
-    logger.info("Ботът е стартиран")
+    logger.info("🤖 ICP Ботът е стартиран (само сигнали, без новини)")
     
     # Тестова проверка дали Telegram работи
-    test_msg = "🤖 ICP Bot стартира успешно в GitHub Actions!"
+    test_msg = "🤖 ICP Bot стартира успешно!\n📊 Ще получавате само ценови сигнали (без новини)."
     if send_telegram(test_msg):
-        logger.info("Telegram връзката работи")
+        logger.info("✅ Telegram връзката работи")
     else:
-        logger.error("Telegram връзката НЕ работи! Проверете токена и чат ID.")
+        logger.error("❌ Telegram връзката НЕ работи! Проверете токена и чат ID.")
         return
     
-    # Изпълни проверката веднъж (за GitHub Actions)
+    # Изпълни САМО проверка на цена (без новини)
     run_price_check(state)
-    run_news_check(state)
     
-    logger.info(f"Ботът е стартиран в режим 'loop'")
-    logger.info(f"Проверка на цена на всеки {PRICE_CHECK_INTERVAL_MIN} минути")
-    logger.info(f"Проверка на новини на всеки {NEWS_CHECK_INTERVAL_MIN} минути")
-    logger.info("Натисни Ctrl+C за спиране")
-    
-    last_price_check = 0
-    last_news_check = 0
-    
-    # Изпращаме веднага при старт
-    run_price_check(state)
-    run_news_check(state)
-    last_price_check = time.time()
-    last_news_check = time.time()
-    
-    while True:
-        try:
-            time.sleep(30)
-            now = time.time()
-            
-            if now - last_price_check >= PRICE_CHECK_INTERVAL_MIN * 60:
-                run_price_check(state)
-                last_price_check = now
-                
-            if now - last_news_check >= NEWS_CHECK_INTERVAL_MIN * 60:
-                run_news_check(state)
-                last_news_check = now
-                
-        except KeyboardInterrupt:
-            logger.info("Ботът е спрян от потребителя")
-            break
-        except Exception as e:
-            logger.error(f"Неочаквана грешка в main loop: {e}")
-            time.sleep(10)
+    logger.info("✅ Ботът завърши успешно!")
 
 
 if __name__ == "__main__":
