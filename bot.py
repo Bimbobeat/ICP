@@ -790,9 +790,10 @@ def main():
     logger.info("Ботът е стартиран")
 
 def main():
-    # Вземи токените от environment variables (GitHub Secrets)
+    """Главна функция"""
     global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
     
+    # Вземи токените от environment variables (GitHub Secrets)
     TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)
     TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)
     
@@ -801,20 +802,21 @@ def main():
         logger.error("Добави ги като Secrets в GitHub Actions")
         return
     
-    # Останалият код...
+    # Зареди състоянието
+    state = load_state()
+    logger.info("Ботът е стартиран")
     
     # Тестова проверка дали Telegram работи
-    test_msg = "🤖 Ботът е стартиран успешно!"
+    test_msg = "🤖 ICP Bot стартира успешно в GitHub Actions!"
     if send_telegram(test_msg):
         logger.info("Telegram връзката работи")
     else:
         logger.error("Telegram връзката НЕ работи! Проверете токена и чат ID.")
         return
     
-    if RUN_MODE == "once":
-        run_price_check(state)
-        run_news_check(state)
-        return
+    # Изпълни проверката веднъж (за GitHub Actions)
+    run_price_check(state)
+    run_news_check(state)
     
     logger.info(f"Ботът е стартиран в режим 'loop'")
     logger.info(f"Проверка на цена на всеки {PRICE_CHECK_INTERVAL_MIN} минути")
