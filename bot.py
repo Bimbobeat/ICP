@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 
 import feedparser
@@ -17,16 +17,23 @@ TELEGRAM_BOT_TOKEN = ""  # Взема се от environment
 TELEGRAM_CHAT_ID = ""    # Взема се от environment
 
 RUN_MODE = "once"  # За GitHub Actions
-PRICE_CHECK_INTERVAL_MIN = 1
 STATE_FILE = "icp_bot_state.json"
 LOG_FILE = "icp_bot.log"
 
 COINGECKO_ID = "internet-computer"
 
+# ============ ТВОИТЕ НАСТРОЙКИ ============
+TARGET_ICP = 1000  # Цел: 1000 ICP
+CURRENT_ICP = 85   # Текущо притежание
+BUY_ZONE_LOW = 2.10   # Долна граница за покупка
+BUY_ZONE_HIGH = 2.50  # Горна граница за покупка
+SELL_TARGETS = [3.00, 3.50, 4.00, 5.00]  # Цели за продажба
+# ===================================
+
 # Алармени прагове
-ALERT_PRICE_CHANGE_PCT = [5, 10, 15, 20]
-RSI_OVERSOLD = 25
-RSI_OVERBOUGHT = 75
+ALERT_PRICE_CHANGE_PCT = [3, 5, 8, 10]
+RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 70
 # ===================================
 
 # Настройка на логване
@@ -72,11 +79,15 @@ def load_state() -> Dict:
         "sent_news_ids": [],
         "last_verdict": None,
         "last_price": None,
+        "last_buy_signal": None,
+        "last_sell_signal": None,
         "daily_report_sent": False,
         "last_report_date": None,
         "price_alerts": {},
         "sma_cross_alert": None,
-        "rsi_alert": False
+        "rsi_alert": False,
+        "news_sent_today": 0,
+        "last_news_date": None
     }
 
 
@@ -94,7 +105,6 @@ def send_telegram(text: str, parse_mode: str = "HTML") -> bool:
     if not text or not text.strip():
         return False
     
-    # Ограничаваме дължината на съобщението (Telegram лимит 4096 символа)
     if len(text) > 4000:
         text = text[:4000] + "..."
     
@@ -254,12 +264,10 @@ def calculate_macd(values: List[float]) -> Tuple[Optional[float], Optional[float
     if len(values) < 35:
         return None, None, None
     
-    # Използваме проста EMA имплементация
     def ema(data: List[float], period: int) -> List[float]:
         if len(data) < period:
             return []
         result = []
-        # Първа стойност = SMA
         ema_val = sum(data[:period]) / period
         result.append(ema_val)
         multiplier = 2 / (period + 1)
@@ -272,12 +280,10 @@ def calculate_macd(values: List[float]) -> Tuple[Optional[float], Optional[float
         ema12 = ema(values, 12)
         ema26 = ema(values, 26)
         
-        # MACD линия
         macd_line = []
         for i in range(min(len(ema12), len(ema26))):
             macd_line.append(ema12[i] - ema26[i])
         
-        # Сигнална линия (EMA9 на MACD)
         signal_line = ema(macd_line, 9)
         
         if macd_line and signal_line:
@@ -299,7 +305,6 @@ def calculate_bollinger_bands(values: List[float], period: int = 20, std_dev: fl
     recent = values[-period:]
     sma = sum(recent) / period
     
-    # Изчисляваме стандартно отклонение
     variance = sum((x - sma) ** 2 for x in recent) / period
     std = variance ** 0.5
     
@@ -342,127 +347,135 @@ def get_signal_emoji(verdict: str) -> str:
         "BUY": "🟢",
         "HOLD": "🟡",
         "SELL": "🔴",
-        "STRONG SELL": "🔴🔴"
+        "STRONG SELL": "🔴🔴",
+        "BUY ZONE": "🟢🔥",
+        "SELL ZONE": "🔴🔥"
     }
     return emojis.get(verdict, "⚪")
 
 
-def compute_signal(values: List[float], market_data: Dict) -> Dict:
-    """Изчислява всички индикатори и сигнали"""
-    if not values:
-        return {"error": "Няма ценови данни"}
+def compute_personalized_signal(price: float, rsi: Optional[float], sma20: Optional[float], sma50: Optional[float]) -> Dict:
+    """Изчислява персонализиран сигнал според твоята стратегия"""
     
-    price = values[-1]
+    # ===== СИГНАЛ ЗА ПОКУПКА =====
+    buy_signals = 0
+    buy_reasons = []
     
-    # Основни индикатори
-    sma20 = calculate_sma(values, 20)
-    sma50 = calculate_sma(values, 50)
-    sma200 = calculate_sma(values, 200)
-    rsi = calculate_rsi(values, 14)
-    momentum = calculate_momentum(values, 10)
+    # 1. Цената е в зоната за покупка
+    if BUY_ZONE_LOW <= price <= BUY_ZONE_HIGH:
+        buy_signals += 2
+        buy_reasons.append(f"✅ Цената е в зоната за покупка (${price:.4f})")
+    elif price < BUY_ZONE_LOW:
+        buy_signals += 3
+        buy_reasons.append(f"🔥 Цената е ПОД зоната за покупка - ОТЛИЧЕН МОМЕНТ! (${price:.4f})")
+    elif price < BUY_ZONE_HIGH * 1.1:
+        buy_signals += 1
+        buy_reasons.append(f"📈 Цената е близо до зоната за покупка (${price:.4f})")
     
-    # MACD
-    macd_line, macd_signal, macd_hist = calculate_macd(values)
-    
-    # Bollinger Bands
-    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(values)
-    
-    # Изчисляваме сигнал
-    rsi_score = 0
+    # 2. RSI - свръхпродаденост
     if rsi is not None:
         if rsi < 30:
-            rsi_score = 2
+            buy_signals += 2
+            buy_reasons.append(f"🔥 RSI е {rsi:.1f} - СВРЪХПРОДАДЕНО!")
         elif rsi < 40:
-            rsi_score = 1
-        elif rsi > 70:
-            rsi_score = -2
-        elif rsi > 60:
-            rsi_score = -1
+            buy_signals += 1
+            buy_reasons.append(f"📉 RSI е {rsi:.1f} - близо до свръхпродаденост")
     
-    ma_score = 0
-    if sma20 is not None and sma50 is not None:
-        if price > sma20 > sma50:
-            ma_score = 2
-        elif price < sma20 < sma50:
-            ma_score = -2
+    # 3. Цената е под SMA50 (добра за покупка)
+    if sma50 is not None and price < sma50:
+        buy_signals += 1
+        buy_reasons.append(f"📊 Цената е под SMA50 (${sma50:.4f}) - добра за покупка")
     
-    mom_score = 0
-    if momentum is not None:
-        if momentum > 1:
-            mom_score = 1
-        elif momentum < -1:
-            mom_score = -1
+    # 4. Цената е под SMA20
+    if sma20 is not None and price < sma20:
+        buy_signals += 1
+        buy_reasons.append(f"📊 Цената е под SMA20 (${sma20:.4f})")
     
-    macd_score = 0
-    if macd_hist is not None:
-        if macd_hist > 0:
-            macd_score = 1
-        else:
-            macd_score = -1
+    # ===== СИГНАЛ ЗА ПРОДАЖБА =====
+    sell_signals = 0
+    sell_reasons = []
     
-    total = rsi_score + ma_score + mom_score + macd_score
+    # 1. Цената е над целите за продажба
+    for target in SELL_TARGETS:
+        if price >= target:
+            sell_signals += 2
+            sell_reasons.append(f"💰 Цената достигна цел ${target:.2f}!")
+            break
+        elif price >= target * 0.95:
+            sell_signals += 1
+            sell_reasons.append(f"📈 Цената е близо до цел ${target:.2f} (на {((price/target)*100):.1f}%)")
     
-    if total >= 3:
-        verdict = "STRONG BUY"
-    elif total >= 1:
-        verdict = "BUY"
-    elif total >= -1:
-        verdict = "HOLD"
-    elif total >= -3:
-        verdict = "SELL"
-    else:
-        verdict = "STRONG SELL"
-    
-    # AI Score (опростен)
-    ai_score = 5.0
+    # 2. RSI - свръхкупеност
     if rsi is not None:
-        if rsi < 30:
-            ai_score += 2.0
-        elif rsi > 70:
-            ai_score -= 2.0
-    if sma20 is not None and sma50 is not None:
-        if price > sma20 > sma50:
-            ai_score += 1.5
-        elif price < sma20 < sma50:
-            ai_score -= 1.5
-    if macd_hist is not None:
-        if macd_hist > 0:
-            ai_score += 1.0
-        else:
-            ai_score -= 1.0
-    ai_score = max(0, min(10, ai_score))
+        if rsi > 70:
+            sell_signals += 2
+            sell_reasons.append(f"🔥 RSI е {rsi:.1f} - СВРЪХКУПЕНО!")
+        elif rsi > 60:
+            sell_signals += 1
+            sell_reasons.append(f"📈 RSI е {rsi:.1f} - близо до свръхкупеност")
+    
+    # 3. Цената е над SMA50 (добра за продажба)
+    if sma50 is not None and price > sma50:
+        sell_signals += 1
+        sell_reasons.append(f"📊 Цената е над SMA50 (${sma50:.4f})")
+    
+    # ===== ФИНАЛЕН СИГНАЛ =====
+    if buy_signals >= 4:
+        verdict = "STRONG BUY"
+        action = "КУПИ СЕГА! 🟢🔥"
+        priority = "HIGH"
+    elif buy_signals >= 2:
+        verdict = "BUY"
+        action = "Купи 🟢"
+        priority = "MEDIUM"
+    elif sell_signals >= 4:
+        verdict = "STRONG SELL"
+        action = "ПРОДАЙ СЕГА! 🔴🔥"
+        priority = "HIGH"
+    elif sell_signals >= 2:
+        verdict = "SELL"
+        action = "Продай 🔴"
+        priority = "MEDIUM"
+    else:
+        verdict = "HOLD"
+        action = "Изчакай 🟡"
+        priority = "LOW"
+    
+    # ===== ИЗЧИСЛЯВАНЕ НА ПОТЕНЦИАЛНА ПЕЧАЛБА =====
+    profit_calculations = []
+    for target in SELL_TARGETS:
+        if target > price:
+            profit_pct = ((target - price) / price) * 100
+            profit_usd = (target - price) * TARGET_ICP
+            profit_calculations.append({
+                "target": target,
+                "profit_pct": profit_pct,
+                "profit_usd": profit_usd
+            })
     
     return {
-        "price": price,
-        "sma20": sma20,
-        "sma50": sma50,
-        "sma200": sma200,
-        "rsi": rsi,
-        "momentum": momentum,
-        "macd_line": macd_line,
-        "macd_signal": macd_signal,
-        "macd_histogram": macd_hist,
-        "bb_upper": bb_upper,
-        "bb_middle": bb_middle,
-        "bb_lower": bb_lower,
-        "total_score": total,
         "verdict": verdict,
-        "ai_score": ai_score,
-        "market_cap": market_data.get("market_cap"),
-        "volume_24h": market_data.get("volume_24h"),
-        "ath": market_data.get("ath"),
-        "atl": market_data.get("atl"),
-        "ath_change_pct": market_data.get("ath_change_pct"),
+        "action": action,
+        "priority": priority,
+        "buy_signals": buy_signals,
+        "buy_reasons": buy_reasons,
+        "sell_signals": sell_signals,
+        "sell_reasons": sell_reasons,
+        "profit_calculations": profit_calculations,
+        "needed_icp": TARGET_ICP - CURRENT_ICP,
+        "current_icp": CURRENT_ICP,
+        "target_icp": TARGET_ICP
     }
 
 
-def format_signal_message(current: Dict, sig: Dict, fear_greed: Optional[Dict], btc_dom: Optional[float]) -> str:
-    """Форматира съобщението за сигнал"""
+def format_personalized_message(current: Dict, sig: Dict, fear_greed: Optional[Dict], btc_dom: Optional[float], personalized: Dict) -> str:
+    """Форматира персонализирано съобщение"""
     chg = current.get("usd_24h_change", 0) or 0
     chg_emoji = "📈" if chg >= 0 else "📉"
+    price = sig["price"]
     
     # Signal emoji
-    signal_emoji = get_signal_emoji(sig["verdict"])
+    signal_emoji = get_signal_emoji(personalized["verdict"])
     
     # Fear & Greed
     fg_str = "N/A"
@@ -485,11 +498,17 @@ def format_signal_message(current: Dict, sig: Dict, fear_greed: Optional[Dict], 
         elif sig["rsi"] > RSI_OVERBOUGHT:
             rsi_status = " 🔥 Overbought"
     
+    # Построяване на съобщението
     lines = [
-        "<b>🚀 ICP MARKET UPDATE</b>",
+        "<b>🚀 ICP PERSONALIZED SIGNAL</b>",
         "",
-        f"💰 <b>Price</b>: {format_price(sig['price'])}",
+        f"💰 <b>Price</b>: {format_price(price)}",
         f"{chg_emoji} <b>24h</b>: {chg:+.2f}%",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🎯 <b>СИГНАЛ</b>: {signal_emoji} {personalized['action']}",
+        f"📊 <b>Приоритет</b>: {personalized['priority']}",
+        "━━━━━━━━━━━━━━━━━━━━",
         "",
         f"📊 <b>Market Cap</b>: {format_large_number(sig['market_cap'])}",
         f"💵 <b>Volume</b>: {format_large_number(sig['volume_24h'])}",
@@ -499,19 +518,46 @@ def format_signal_message(current: Dict, sig: Dict, fear_greed: Optional[Dict], 
         f"📊 <b>SMA20</b>: {format_price(sig['sma20'])}",
         f"📊 <b>SMA50</b>: {format_price(sig['sma50'])}",
         "",
-        f"🎯 <b>Signal</b>: {signal_emoji} {sig['verdict']}",
-        f"🤖 <b>AI Score</b>: {sig['ai_score']:.1f} / 10",
-        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "📊 <b>ТВОЯТА ПОЗИЦИЯ</b>",
+        f"🪙 <b>ICP</b>: {personalized['current_icp']} / {personalized['target_icp']}",
+        f"📦 <b>Нужни</b>: {personalized['needed_icp']} ICP",
+        f"📈 <b>Прогрес</b>: {((personalized['current_icp']/personalized['target_icp'])*100):.1f}%",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ]
+    
+    # Причини за покупка
+    if personalized['buy_reasons']:
+        lines.append("🟢 <b>ПРИЧИНИ ЗА ПОКУПКА</b>")
+        for reason in personalized['buy_reasons']:
+            lines.append(f"  {reason}")
+        lines.append("")
+    
+    # Причини за продажба
+    if personalized['sell_reasons']:
+        lines.append("🔴 <b>ПРИЧИНИ ЗА ПРОДАЖБА</b>")
+        for reason in personalized['sell_reasons']:
+            lines.append(f"  {reason}")
+        lines.append("")
+    
+    # Потенциална печалба
+    if personalized['profit_calculations']:
+        lines.append("💰 <b>ПОТЕНЦИАЛНА ПЕЧАЛБА</b>")
+        for calc in personalized['profit_calculations'][:3]:
+            lines.append(f"  🎯 ${calc['target']:.2f}: +{calc['profit_pct']:.1f}% (${calc['profit_usd']:,.0f})")
+        lines.append("")
+    
+    lines.extend([
         f"😨 <b>Fear & Greed</b>: {fg_str}",
         f"₿ <b>BTC Dominance</b>: {btc_str}",
         "",
         f"🏆 <b>ATH</b>: {format_price(sig['ath'])}",
         f"📉 <b>Distance from ATH</b>: {sig['ath_change_pct']:+.1f}%" if sig["ath_change_pct"] else "N/A",
         "",
-        "<i>Автоматичен технически сигнал, не е финансов съвет.</i>"
-    ]
+        "<i>📌 Базирано на твоята стратегия: купувай между $2.10-$2.50</i>",
+        "<i>⚠️ Не е финансов съвет - сам вземай решенията!</i>"
+    ])
     
-    # Филтрираме празни редове
     lines = [line for line in lines if line and line.strip()]
     return "\n".join(lines)
 
@@ -529,7 +575,6 @@ def check_price_alerts(state: Dict, old_price: float, new_price: float):
             key = f"{threshold}_{'up' if change_pct > 0 else 'down'}"
             last_alert = state["price_alerts"].get(key, {}).get("timestamp", 0)
             
-            # Изпращаме аларма не по-често от веднъж на 30 минути
             if time.time() - last_alert > 1800:
                 emoji = "🚀" if change_pct > 0 else "🔻"
                 msg = (
@@ -581,29 +626,37 @@ def check_rsi_alert(state: Dict, sig: Dict):
         msg = (
             f"{emoji} <b>RSI аларма!</b>\n"
             f"RSI е {sig['rsi']:.1f}\n"
-            f"{'Препоръчително купуване' if condition == 'oversold' else 'Препоръчително продаване'}"
+            f"{'🔥 СВРЪХПРОДАДЕНО - МОМЕНТ ЗА ПОКУПКА!' if condition == 'oversold' else '⚠️ СВРЪХКУПЕНО - МОМЕНТ ЗА ПРОДАЖБА!'}"
         )
         send_telegram(msg)
         state["rsi_alert"] = rsi_alert
         save_state(state)
 
 
-def format_daily_report(sig: Dict, current: Dict, fear_greed: Optional[Dict], btc_dom: Optional[float]) -> str:
-    """Форматира дневен отчет"""
+def format_daily_report(sig: Dict, current: Dict, fear_greed: Optional[Dict], btc_dom: Optional[float], personalized: Dict) -> str:
+    """Форматира дневен отчет с персонализирана информация"""
     chg = current.get("usd_24h_change", 0) or 0
     chg_emoji = "📈" if chg >= 0 else "📉"
     today = datetime.now().strftime("%d %B %Y")
+    price = sig["price"]
     
     lines = [
         f"<b>📅 ДНЕВЕН ОТЧЕТ - {today}</b>",
         "",
-        f"💰 <b>Цена</b>: {format_price(sig['price'])} {chg_emoji} {chg:+.2f}%",
+        f"💰 <b>Цена</b>: {format_price(price)} {chg_emoji} {chg:+.2f}%",
         f"📊 <b>Market Cap</b>: {format_large_number(sig['market_cap'])}",
         f"💵 <b>Volume</b>: {format_large_number(sig['volume_24h'])}",
         "",
+        "━━━━━━━━━━━━━━━━━━━━",
         f"📉 <b>RSI(14)</b>: {sig['rsi']:.1f}" if sig["rsi"] else "📉 RSI: N/A",
-        f"🎯 <b>Signal</b>: {get_signal_emoji(sig['verdict'])} {sig['verdict']}",
+        f"🎯 <b>Signal</b>: {get_signal_emoji(personalized['verdict'])} {personalized['action']}",
         f"🤖 <b>AI Score</b>: {sig['ai_score']:.1f}/10",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🪙 <b>Твоите ICP</b>: {personalized['current_icp']} / {personalized['target_icp']}",
+        f"📦 <b>Нужни за целта</b>: {personalized['needed_icp']} ICP",
+        f"📈 <b>Прогрес</b>: {((personalized['current_icp']/personalized['target_icp'])*100):.1f}%",
+        "━━━━━━━━━━━━━━━━━━━━",
         "",
         f"😨 <b>Fear & Greed</b>: {fear_greed['value']} ({fear_greed['classification']})" if fear_greed else "N/A",
         f"₿ <b>BTC Dominance</b>: {btc_dom:.1f}%" if btc_dom else "N/A",
@@ -611,9 +664,125 @@ def format_daily_report(sig: Dict, current: Dict, fear_greed: Optional[Dict], bt
         f"🏆 <b>ATH</b>: {format_price(sig['ath'])}",
         f"📉 <b>Distance from ATH</b>: {sig['ath_change_pct']:+.1f}%" if sig["ath_change_pct"] else "N/A",
         "",
-        "<i>Автоматичен дневен отчет</i>"
+        "<i>📌 Стратегия: Купувай между $2.10-$2.50</i>",
+        "<i>🎯 Цел: 1000 ICP</i>",
+        "<i>⚠️ Не е финансов съвет</i>"
     ]
     return "\n".join(lines)
+
+
+# ============ НОВИНИ (само за ICP, последните 24 часа) ============
+NEWS_FEEDS = [
+    {"url": "https://cointelegraph.com/rss/tag/internet-computer", "name": "Cointelegraph", "keyword_filter": False},
+    {"url": "https://www.coindesk.com/arc/outboundfeeds/rss/", "name": "CoinDesk", "keyword_filter": True},
+    {"url": "https://decrypt.co/feed", "name": "Decrypt", "keyword_filter": True},
+    {"url": "https://cryptoslate.com/feed/", "name": "CryptoSlate", "keyword_filter": True},
+]
+
+ICP_KEYWORD_RE = re.compile(r"\b(icp|internet computer|internet-computer)\b", re.IGNORECASE)
+
+
+def fetch_news() -> List[Dict]:
+    """Взима новини само за ICP от последните 24 часа"""
+    items = []
+    
+    # Само последните 24 часа
+    cutoff_time = time.time() - (24 * 60 * 60)
+    
+    for feed in NEWS_FEEDS:
+        try:
+            parsed = feedparser.parse(feed["url"])
+            for entry in parsed.entries[:30]:
+                title = entry.get("title", "")
+                summary = entry.get("summary", "")
+                
+                # Филтър само за ICP
+                if not ICP_KEYWORD_RE.search(title + " " + summary):
+                    continue
+                
+                link = entry.get("link", "")
+                item_id = entry.get("id") or link
+                
+                if entry.get("published_parsed"):
+                    published_ts = calendar.timegm(entry["published_parsed"])
+                elif entry.get("updated_parsed"):
+                    published_ts = calendar.timegm(entry["updated_parsed"])
+                else:
+                    published_ts = int(time.time())
+                
+                # Пропускаме новини по-стари от 24 часа
+                if published_ts < cutoff_time:
+                    continue
+                
+                items.append({
+                    "id": item_id,
+                    "title": title,
+                    "url": link,
+                    "source": feed["name"],
+                    "published_on": published_ts,
+                })
+        except Exception as e:
+            logger.error(f"Грешка при четене на RSS ({feed['name']}): {e}")
+    
+    items.sort(key=lambda x: x["published_on"], reverse=True)
+    return items[:3]  # Максимум 3 новини
+
+
+def format_news_message(item: Dict) -> str:
+    """Форматира новинарско съобщение"""
+    published = datetime.fromtimestamp(item["published_on"], tz=timezone.utc)
+    when = published.strftime("%d %b %Y, %H:%M UTC")
+    return (
+        f"📰 <b>ICP НОВИНА</b>\n"
+        f"{item['title']}\n"
+        f"{item['source']} · {when}\n"
+        f"{item['url']}"
+    )
+
+
+def run_news_check(state: Dict):
+    """Проверява за новини (макс 3 на ден)"""
+    try:
+        logger.info("Проверка за новини...")
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        # Проверяваме дали днес сме пращали новини
+        if state.get("last_news_date") != today:
+            state["news_sent_today"] = 0
+            state["last_news_date"] = today
+        
+        # Ако вече сме пратили 3 новини днес, спираме
+        if state.get("news_sent_today", 0) >= 3:
+            logger.info("Днес вече са изпратени 3 новини.")
+            return
+        
+        # Взимаме новини
+        items = fetch_news()
+        sent_ids = set(state.get("sent_news_ids", []))
+        
+        # Филтрираме само новите
+        new_items = [i for i in items if str(i["id"]) not in sent_ids]
+        
+        # Колко новини можем да изпратим днес
+        remaining = 3 - state.get("news_sent_today", 0)
+        new_items = new_items[:remaining]
+        
+        for item in new_items:
+            send_telegram(format_news_message(item))
+            sent_ids.add(str(item["id"]))
+            state["news_sent_today"] = state.get("news_sent_today", 0) + 1
+            time.sleep(1)
+        
+        if new_items:
+            state["sent_news_ids"] = list(sent_ids)[-200:]
+            save_state(state)
+            logger.info(f"Изпратени {len(new_items)} нови новини.")
+        else:
+            logger.info("Няма нови новини.")
+            
+    except Exception as e:
+        logger.error(f"Грешка при проверка на новини: {e}")
 
 
 def run_price_check(state: Dict):
@@ -640,6 +809,14 @@ def run_price_check(state: Dict):
         fear_greed = fetch_fear_greed_index()
         btc_dom = fetch_btc_dominance()
         
+        # Персонализиран сигнал
+        personalized = compute_personalized_signal(
+            sig["price"],
+            sig["rsi"],
+            sig["sma20"],
+            sig["sma50"]
+        )
+        
         # Проверки за аларми
         old_price = state.get("last_price")
         if old_price is not None:
@@ -648,14 +825,18 @@ def run_price_check(state: Dict):
         check_sma_cross(state, sig)
         check_rsi_alert(state, sig)
         
-        # Изпращаме сигнал само ако се е променил
-        if sig["verdict"] != state.get("last_verdict"):
-            msg = format_signal_message(current, sig, fear_greed, btc_dom)
+        # Проверяваме дали сигналът се е променил
+        current_verdict = personalized["verdict"]
+        last_verdict = state.get("last_verdict")
+        
+        # Изпращаме само при промяна или при силен сигнал
+        if current_verdict != last_verdict or current_verdict in ["STRONG BUY", "STRONG SELL"]:
+            msg = format_personalized_message(current, sig, fear_greed, btc_dom, personalized)
             send_telegram(msg)
-            state["last_verdict"] = sig["verdict"]
-            logger.info(f"Изпратен нов сигнал: {sig['verdict']}")
+            state["last_verdict"] = current_verdict
+            logger.info(f"Изпратен сигнал: {current_verdict}")
         else:
-            logger.info(f"Сигналът е същият ({sig['verdict']}), не се праща ново съобщение.")
+            logger.info(f"Сигналът е същият ({current_verdict}), не се праща ново съобщение.")
         
         # Запазваме текущата цена
         state["last_price"] = sig["price"]
@@ -663,7 +844,7 @@ def run_price_check(state: Dict):
         # Дневен отчет (веднъж на ден)
         today = datetime.now().strftime("%Y-%m-%d")
         if state.get("last_report_date") != today:
-            daily_msg = format_daily_report(sig, current, fear_greed, btc_dom)
+            daily_msg = format_daily_report(sig, current, fear_greed, btc_dom, personalized)
             send_telegram(daily_msg)
             state["last_report_date"] = today
             logger.info("Изпратен дневен отчет")
@@ -677,7 +858,7 @@ def run_price_check(state: Dict):
 
 
 def main():
-    """Главна функция - САМО ЦЕНОВИ СИГНАЛИ (без новини)"""
+    """Главна функция - СИГНАЛИ + 3 НОВИНИ НА ДЕН"""
     global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
     
     # Вземи токените от environment variables (GitHub Secrets)
@@ -691,18 +872,34 @@ def main():
     
     # Зареди състоянието
     state = load_state()
-    logger.info("🤖 ICP Ботът е стартиран (само сигнали, без новини)")
+    logger.info("🤖 ICP Ботът е стартиран")
+    logger.info(f"📊 Твоята цел: {TARGET_ICP} ICP")
+    logger.info(f"🪙 Текущо притежание: {CURRENT_ICP} ICP")
+    logger.info(f"📈 Трябват ти още: {TARGET_ICP - CURRENT_ICP} ICP")
     
     # Тестова проверка дали Telegram работи
-    test_msg = "🤖 ICP Bot стартира успешно!\n📊 Ще получавате само ценови сигнали (без новини)."
+    test_msg = (
+        f"🤖 <b>ICP Bot стартира успешно!</b>\n\n"
+        f"📊 <b>Твоята стратегия:</b>\n"
+        f"🪙 Цел: {TARGET_ICP} ICP\n"
+        f"💰 Текущо: {CURRENT_ICP} ICP\n"
+        f"📈 Остават: {TARGET_ICP - CURRENT_ICP} ICP\n"
+        f"🎯 Зона за покупка: ${BUY_ZONE_LOW:.2f} - ${BUY_ZONE_HIGH:.2f}\n"
+        f"📈 Цели за продажба: ${', $'.join([str(x) for x in SELL_TARGETS])}\n\n"
+        f"📰 Ще получаваш до 3 новини на ден за ICP\n"
+        f"📊 Ще получаваш сигнали за покупка/продажба"
+    )
     if send_telegram(test_msg):
         logger.info("✅ Telegram връзката работи")
     else:
-        logger.error("❌ Telegram връзката НЕ работи! Проверете токена и чат ID.")
+        logger.error("❌ Telegram връзката НЕ работи!")
         return
     
-    # Изпълни САМО проверка на цена (без новини)
+    # Изпълни проверка на цена
     run_price_check(state)
+    
+    # Изпълни проверка за новини
+    run_news_check(state)
     
     logger.info("✅ Ботът завърши успешно!")
 
